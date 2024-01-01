@@ -38,7 +38,9 @@ func ShellProcess() error {
 		return err
 	}
 
-	command := strings.Trim(strings.TrimSuffix(commandRaw, "\n"), " ")
+	commandRaw = strings.Trim(strings.TrimSuffix(commandRaw, "\n"), " ")
+
+	command := Interpolate(commandRaw)
 
 	// fmt.Println("command", command)
 
@@ -100,6 +102,8 @@ func ShellProcess() error {
 		return err
 	}
 
+	// interpolatedArgs = strings.Replacer
+
 	proc, err := StartNewProcess(wdRaw, path, args, tempfile.Fd())
 
 	if err != nil {
@@ -134,6 +138,19 @@ func main() {
 
 	wdRaw, _ = os.Getwd()
 
+	init := exec.Cmd{
+		Path:   "/bin/sh",
+		Args:   []string{"/Users/tusharf5/.zshrc"},
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}
+
+	err := init.Start()
+
+	if err != nil {
+		fmt.Println("initialization error: ", err)
+	}
+
 	fmt.Println("welcome to shell")
 
 	for {
@@ -143,6 +160,22 @@ func main() {
 			fmt.Println("error: ", err)
 		}
 	}
+}
+
+func Interpolate(str string) string {
+	var envVarsList [][]string
+
+	for _, x := range os.Environ() {
+		val := strings.Split(x, "=")
+		envVarsList = append(envVarsList, []string{"$" + val[0], val[1]})
+		envVarsList = append(envVarsList, []string{"${" + val[0] + "}", val[1]})
+	}
+
+	for _, pair := range envVarsList {
+		str = strings.ReplaceAll(str, pair[0], pair[1])
+	}
+
+	return str
 }
 
 func CommandExists(cmd string) (string, error) {
