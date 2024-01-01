@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,9 +11,13 @@ import (
 	"syscall"
 )
 
+var wdRaw string
+
 func ShellProcess() error {
 
-	wd, _ := os.Getwd()
+	homedir, _ := os.UserHomeDir()
+
+	wd := strings.Replace(wdRaw, homedir, "~", 1)
 
 	fmt.Print(wd + "> ")
 
@@ -33,17 +38,61 @@ func ShellProcess() error {
 		return err
 	}
 
-	command := strings.TrimRight(commandRaw, "\n")
+	command := strings.Trim(strings.TrimSuffix(commandRaw, "\n"), " ")
 
 	// fmt.Println("command", command)
 
-	program := strings.Split(command, " ")
+	args := strings.Split(command, " ")
+
+	program := args[0]
+
+	if program == "cd" {
+
+		if len(args) == 1 {
+			wdRaw = homedir
+			return nil
+		}
+
+		if len(args) == 2 {
+
+			if args[1] == "." {
+				return nil
+			} else if args[1] == ".." {
+				lastIndex := strings.LastIndex(wdRaw, "/")
+				wdRaw = wdRaw[:lastIndex]
+				return nil
+			} else {
+
+				entries, err := os.ReadDir(wdRaw)
+
+				if err != nil {
+					return nil
+				}
+
+				for _, e := range entries {
+					if e.IsDir() && args[1] == e.Name() {
+						wdRaw = wdRaw + "/" + e.Name()
+						return nil
+					}
+				}
+
+				return errors.New("directoy not found")
+
+			}
+
+		}
+
+		if len(args) > 2 {
+			return errors.New("invalid cd arguments")
+		}
+
+	}
 
 	// fmt.Println("argv", program)
 
 	// fmt.Println("program", program[0])
 
-	path, err := CommandExists(program[0])
+	path, err := CommandExists(program)
 
 	// fmt.Println("path", path)
 
@@ -51,7 +100,7 @@ func ShellProcess() error {
 		return err
 	}
 
-	proc, err := StartNewProcess(path, program, tempfile.Fd())
+	proc, err := StartNewProcess(wdRaw, path, args, tempfile.Fd())
 
 	if err != nil {
 		return err
@@ -72,6 +121,7 @@ func ShellProcess() error {
 		fmt.Println(s.Text())
 		// println("exit code:", state.ExitCode())
 	}
+
 	if err = s.Err(); err != nil {
 		log.Fatal("error reading temp file", err)
 	}
@@ -81,6 +131,9 @@ func ShellProcess() error {
 }
 
 func main() {
+
+	wdRaw, _ = os.Getwd()
+
 	fmt.Println("welcome to shell")
 
 	for {
@@ -96,13 +149,7 @@ func CommandExists(cmd string) (string, error) {
 	return exec.LookPath(cmd)
 }
 
-func StartNewProcess(path string, argv []string, stdout uintptr) (*os.Process, error) {
-
-	wd, err := os.Getwd()
-
-	if err != nil {
-		return nil, err
-	}
+func StartNewProcess(wd, path string, argv []string, stdout uintptr) (*os.Process, error) {
 
 	pid, err := syscall.ForkExec(path, argv, &syscall.ProcAttr{
 		Dir:   wd,
