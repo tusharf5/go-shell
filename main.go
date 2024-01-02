@@ -4,130 +4,237 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 )
 
+type Command struct {
+	program string
+	args    []string
+}
+
 var wdRaw string
 
-func ShellProcess() error {
+func parseCommands(input string) []Command {
+	var commands []Command
+	allCommands := strings.Split(input, " | ")
 
+	for _, command := range allCommands {
+		args := strings.Split(command, " ")
+		commands = append(commands, Command{
+			args:    args,
+			program: args[0],
+		})
+	}
+
+	return commands
+}
+
+func promptPrefix() string {
 	homedir, _ := os.UserHomeDir()
-
 	wd := strings.Replace(wdRaw, homedir, "~", 1)
+	return wd + "> "
+}
 
-	fmt.Print(wd + "> ")
-
+func newTempFile() (*os.File, error) {
 	tempfile, err := os.CreateTemp("", "")
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	defer os.Remove(tempfile.Name())
-	defer tempfile.Close()
+	return tempfile, nil
+}
 
-	// fmt.Println("Created temp file: ", tempfile.Name())
-	reader := bufio.NewReader(os.Stdin)
-	commandRaw, err := reader.ReadString('\n')
+func readPrompt(stdin *os.File) (string, error) {
+	reader := bufio.NewReader(stdin)
+
+	command, err := reader.ReadString('\n')
 
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	commandRaw = strings.Trim(strings.TrimSuffix(commandRaw, "\n"), " ")
+	command = strings.Trim(strings.TrimSuffix(command, "\n"), " ")
 
-	command := Interpolate(commandRaw)
+	return command, nil
+}
 
-	// fmt.Println("command", command)
+func readTempFile(file *os.File) (string, error) {
+	var output string = ""
+	file.Seek(0, 0)
+	s := bufio.NewScanner(file)
 
-	args := strings.Split(command, " ")
+	for s.Scan() {
+		output = output + s.Text() + "\n"
+	}
 
-	program := args[0]
+	if err := s.Err(); err != nil {
+		return "", err
+	}
 
-	if program == "cd" {
+	return strings.TrimSuffix(output, "\n"), nil
+}
 
-		if len(args) == 1 {
+func interpolateInput(str string) string {
+	var envVarsList [][]string
+
+	for _, x := range os.Environ() {
+		val := strings.Split(x, "=")
+		envVarsList = append(envVarsList, []string{"$" + val[0], val[1]})
+		envVarsList = append(envVarsList, []string{"${" + val[0] + "}", val[1]})
+	}
+
+	for _, pair := range envVarsList {
+		str = strings.ReplaceAll(str, pair[0], pair[1])
+	}
+
+	return str
+}
+
+func executeProgram(wd, path string, argv []string, stdin uintptr, stdout uintptr) (*os.Process, error) {
+
+	pid, err := syscall.ForkExec(path, argv, &syscall.ProcAttr{
+		Dir:   wd,
+		Env:   os.Environ(),
+		Files: []uintptr{stdin, stdout, stdout},
+	})
+
+	if err != nil {
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	proc, err := os.FindProcess(pid)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return proc, nil
+
+}
+
+func handleShellCommand(cmd Command) (exit bool, err error) {
+	homedir, _ := os.UserHomeDir()
+
+	if cmd.program == "cd" {
+
+		if len(cmd.args) == 1 {
 			wdRaw = homedir
-			return nil
+			return true, nil
 		}
 
-		if len(args) == 2 {
+		if len(cmd.args) == 2 {
 
-			if args[1] == "." {
-				return nil
-			} else if args[1] == ".." {
+			if cmd.args[1] == "." {
+				return true, nil
+			} else if cmd.args[1] == ".." {
 				lastIndex := strings.LastIndex(wdRaw, "/")
 				wdRaw = wdRaw[:lastIndex]
-				return nil
+				return true, nil
 			} else {
 
 				entries, err := os.ReadDir(wdRaw)
 
 				if err != nil {
-					return nil
+					return true, nil
 				}
 
 				for _, e := range entries {
-					if e.IsDir() && args[1] == e.Name() {
+					if e.IsDir() && cmd.args[1] == e.Name() {
 						wdRaw = wdRaw + "/" + e.Name()
-						return nil
+						return true, nil
 					}
 				}
 
-				return errors.New("directoy not found")
+				return true, errors.New("directoy not found")
 
 			}
 
 		}
 
-		if len(args) > 2 {
-			return errors.New("invalid cd arguments")
+		if len(cmd.args) > 2 {
+			return true, errors.New("invalid cd arguments")
 		}
 
 	}
 
-	// fmt.Println("argv", program)
+	return false, nil
+}
 
-	// fmt.Println("program", program[0])
+func runCommand(cmd Command, stdin uintptr, stdout uintptr) (*os.ProcessState, error) {
 
-	path, err := CommandExists(program)
+	exit, err := handleShellCommand(cmd)
 
-	// fmt.Println("path", path)
+	if err != nil || exit {
+		return nil, nil
+	}
+
+	binartPath, err := exec.LookPath(cmd.program)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// interpolatedArgs = strings.Replacer
-
-	proc, err := StartNewProcess(wdRaw, path, args, tempfile.Fd())
+	proc, err := executeProgram(wdRaw, binartPath, cmd.args, stdin, stdout)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = proc.Wait()
+	state, err := proc.Wait()
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// println("output:")
+	return state, nil
 
-	// Seek the pointer to the beginning
-	tempfile.Seek(0, 0)
-	s := bufio.NewScanner(tempfile)
-	for s.Scan() {
-		fmt.Println(s.Text())
-		// println("exit code:", state.ExitCode())
-	}
+}
 
-	if err = s.Err(); err != nil {
-		log.Fatal("error reading temp file", err)
+func newSession() error {
+
+	fmt.Print(promptPrefix())
+
+	input, _ := readPrompt(os.Stdin)
+
+	input = interpolateInput(input)
+
+	commands := parseCommands(input)
+
+	var stdin uintptr = 0
+
+	for _, command := range commands {
+
+		stdOutFile, err := newTempFile()
+
+		if err != nil {
+			return err
+		}
+
+		defer os.Remove(stdOutFile.Name())
+		defer stdOutFile.Close()
+
+		_, err = runCommand(command, stdin, stdOutFile.Fd())
+
+		if err != nil {
+			return err
+		}
+
+		stdin = stdOutFile.Fd()
+
+		output, _ := readTempFile(stdOutFile)
+
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(output)
 	}
 
 	return nil
@@ -154,70 +261,10 @@ func main() {
 	fmt.Println("welcome to shell")
 
 	for {
-		err := ShellProcess()
+		err := newSession()
 
 		if err != nil {
 			fmt.Println("error: ", err)
 		}
-	}
-}
-
-func Interpolate(str string) string {
-	var envVarsList [][]string
-
-	for _, x := range os.Environ() {
-		val := strings.Split(x, "=")
-		envVarsList = append(envVarsList, []string{"$" + val[0], val[1]})
-		envVarsList = append(envVarsList, []string{"${" + val[0] + "}", val[1]})
-	}
-
-	for _, pair := range envVarsList {
-		str = strings.ReplaceAll(str, pair[0], pair[1])
-	}
-
-	return str
-}
-
-func CommandExists(cmd string) (string, error) {
-	return exec.LookPath(cmd)
-}
-
-func StartNewProcess(wd, path string, argv []string, stdout uintptr) (*os.Process, error) {
-
-	pid, err := syscall.ForkExec(path, argv, &syscall.ProcAttr{
-		Dir:   wd,
-		Env:   os.Environ(),
-		Files: []uintptr{0, stdout, stdout},
-	})
-
-	if err != nil {
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	proc, err := os.FindProcess(pid)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return proc, nil
-
-}
-
-func StartNewProcessDeprecated() {
-	fmt.Println(os.Getpid())
-	// This will not work as fork was built at a time where processes had single thread of execution.
-	// Go lang uses mutiple threads per process so it really doesn't work well with this.
-	// We can call fork and exec a new process to fix it and there is already a helper for that
-	childId, returnCode, _ := syscall.Syscall(syscall.SYS_FORK, 0, 0, 0)
-	if returnCode == 0 {
-		fmt.Println("hellow from child process", childId)
-	} else if returnCode > 0 {
-		fmt.Println("hellow from parent process", os.Getpid())
-	} else {
-		fmt.Println("fork failed", os.Getpid())
 	}
 }
