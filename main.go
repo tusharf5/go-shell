@@ -11,25 +11,43 @@ import (
 )
 
 type Command struct {
+	stdin   *os.File
+	stdout  *os.File
 	program string
 	args    []string
 }
 
+type CommandSet struct {
+	finalOut *os.File
+	commands []Command
+}
+
 var wdRaw string
 
-func parseCommands(input string) []Command {
+func parseCommands(input string) CommandSet {
+
 	var commands []Command
 	allCommands := strings.Split(input, " | ")
-
+	var finalOut *os.File
 	for _, command := range allCommands {
+		stdin, _ := newTempFile()
+		stdout, _ := newTempFile()
+		finalOut = stdout
 		args := strings.Split(command, " ")
+
 		commands = append(commands, Command{
+			stdin:   stdin,
+			stdout:  stdout,
 			args:    args,
 			program: args[0],
 		})
+
 	}
 
-	return commands
+	return CommandSet{
+		finalOut: finalOut,
+		commands: commands,
+	}
 }
 
 func promptPrefix() string {
@@ -205,37 +223,40 @@ func newSession() error {
 
 	input = interpolateInput(input)
 
-	commands := parseCommands(input)
+	commandset := parseCommands(input)
 
-	var stdin uintptr = 0
+	defer os.Remove(commandset.finalOut.Name())
+	defer commandset.finalOut.Close()
 
-	for _, command := range commands {
+	for index, command := range commandset.commands {
 
-		stdOutFile, err := newTempFile()
+		defer os.Remove(command.stdin.Name())
+		defer os.Remove(command.stdout.Name())
+		defer command.stdin.Close()
+		defer command.stdout.Close()
 
-		if err != nil {
-			return err
+		if index == 0 {
+			_, err := runCommand(command, command.stdin.Fd(), command.stdout.Fd())
+			if err != nil {
+				return err
+			}
+
+		} else {
+			prevComm := commandset.commands[index-1]
+			prevComm.stdout.Seek(0, 0)
+			_, err := runCommand(command, prevComm.stdout.Fd(), command.stdout.Fd())
+
+			if err != nil {
+				return err
+			}
+
 		}
 
-		defer os.Remove(stdOutFile.Name())
-		defer stdOutFile.Close()
-
-		_, err = runCommand(command, stdin, stdOutFile.Fd())
-
-		if err != nil {
-			return err
-		}
-
-		stdin = stdOutFile.Fd()
-
-		output, _ := readTempFile(stdOutFile)
-
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(output)
 	}
+
+	output, _ := readTempFile(commandset.finalOut)
+
+	fmt.Println(output)
 
 	return nil
 
